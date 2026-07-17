@@ -1,3 +1,4 @@
+# Re-triggering GitHub's workflow indexing.
 name: Poll Linear for new issues
 
 on:
