@@ -24,8 +24,8 @@ jobs:
       - name: Clone target repo
         run: |
           git clone "https://x-access-token:${TARGET_REPO_PAT}@github.com/${TARGET_REPO}.git" target-repo
-          git -C target-repo config user.email "hello-agent@users.noreply.github.com"
-          git -C target-repo config user.name "hello-agent"
+          git -C target-repo config user.email "nikhil.shrivastava@spike.sh"
+          git -C target-repo config user.name "nikhil-spike"
         env:
           TARGET_REPO_PAT: ${{ secrets.TARGET_REPO_PAT }}
 
