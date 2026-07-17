@@ -1,0 +1,17 @@
+{
+  "name": "hello-agent",
+  "version": "1.0.0",
+  "description": "Fetches a Linear issue, writes its details to a markdown file, and opens a GitHub PR.",
+  "type": "module",
+  "main": "hello-agent.js",
+  "bin": {
+    "hello-agent": "./hello-agent.js"
+  },
+  "scripts": {
+    "start": "node hello-agent.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "UNLICENSED"
+}
