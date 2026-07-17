@@ -1,15 +1,18 @@
 #!/usr/bin/env node
-// Fetches a Linear issue (a specific one, or the most recently created one),
-// writes its details to a markdown file inside a target repo, commits,
-// pushes a branch, and opens a GitHub PR. This tool's own code is never
-// committed to the target repo -- only the generated ticket file is.
+// Fetches Linear issue(s), writes their details to markdown files inside a
+// target repo, commits, pushes a branch per issue, and opens a GitHub PR.
+// This tool's own code is never committed to the target repo -- only the
+// generated ticket files are.
 //
-// Usage:
-//   node hello-agent.js --repo <path-to-local-clone> [LIN-123|linear-url] [--base <branch>]
-//   (omit the issue ref to auto-fetch the most recently created Linear issue)
+// Single-issue usage:
+//   node hello-agent.js --repo <path> [LIN-123|linear-url] [--base <branch>] [--team <TEAM_KEY>]
+//   (omit the issue ref to use the most recently created issue)
+//
+// Poll usage (checks for any issues without an existing PR yet, processes them all):
+//   node hello-agent.js --poll --repo <path> [--base <branch>] [--team <TEAM_KEY>] [--limit <n>]
 //
 // Required env vars: LINEAR_API_KEY, GITHUB_TOKEN
-// Repo path can also be set via REPO_PATH env var instead of --repo.
+// Repo path can also be set via REPO_PATH env var, team via LINEAR_TEAM_KEY.
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
@@ -47,19 +50,18 @@ function run(cmd, args, cwd) {
 
 function parseArgs(argv) {
   const args = argv.slice(2);
-  let base = null;
-  let repo = null;
+  const opts = { base: null, repo: null, team: null, limit: 20, poll: false };
   const positional = [];
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--base") {
-      base = args[++i];
-    } else if (args[i] === "--repo") {
-      repo = args[++i];
-    } else {
-      positional.push(args[i]);
-    }
+    if (args[i] === "--base") opts.base = args[++i];
+    else if (args[i] === "--repo") opts.repo = args[++i];
+    else if (args[i] === "--team") opts.team = args[++i];
+    else if (args[i] === "--limit") opts.limit = Number(args[++i]);
+    else if (args[i] === "--poll") opts.poll = true;
+    else positional.push(args[i]);
   }
-  return { issueRef: positional[0] ?? null, base, repo };
+  opts.issueRef = positional[0] ?? null;
+  return opts;
 }
 
 function extractIdentifier(ref) {
@@ -107,28 +109,34 @@ async function fetchLinearIssue(identifier, apiKey) {
   return data.issue;
 }
 
-async function fetchLatestLinearIssue(apiKey) {
+async function fetchRecentLinearIssues(apiKey, { teamKey, limit }) {
   const query = `
-    query LatestIssue {
-      issues(first: 1, orderBy: createdAt) {
+    query RecentIssues($first: Int!, $filter: IssueFilter) {
+      issues(first: $first, orderBy: createdAt, filter: $filter) {
         nodes {
           identifier
           title
           description
           url
+          createdAt
         }
       }
     }
   `;
-  const data = await linearGraphQL(apiKey, query, {});
-  const issue = data?.issues?.nodes?.[0];
-  if (!issue) fail("no Linear issues found for this API key");
-  return issue;
+  const filter = teamKey ? { team: { key: { eq: teamKey } } } : undefined;
+  const data = await linearGraphQL(apiKey, query, { first: limit, filter });
+  return data?.issues?.nodes ?? [];
+}
+
+async function fetchLatestLinearIssue(apiKey, { teamKey }) {
+  const issues = await fetchRecentLinearIssues(apiKey, { teamKey, limit: 1 });
+  if (!issues[0]) fail(teamKey ? `no Linear issues found for team "${teamKey}"` : "no Linear issues found for this API key");
+  return issues[0];
 }
 
 function parseOwnerRepo(remoteUrl) {
-  // Handles both SSH (git@host:owner/repo.git, incl. custom Host aliases)
-  // and HTTPS (https://host/owner/repo.git) remote URL forms.
+  // Handles SSH (git@host:owner/repo.git, incl. custom Host aliases) and
+  // HTTPS remote URL forms (including token-embedded https://x:TOKEN@host/owner/repo.git).
   const sshMatch = remoteUrl.match(/^git@[^:]+:([^/]+)\/(.+?)(\.git)?$/);
   if (sshMatch) return { owner: sshMatch[1], repo: sshMatch[2] };
   const httpsMatch = remoteUrl.match(/^https?:\/\/[^/]+\/([^/]+)\/(.+?)(\.git)?$/);
@@ -151,6 +159,11 @@ async function githubApi(path, token, options = {}) {
     fail(`GitHub API ${options.method ?? "GET"} ${path} failed: ${res.status} ${res.statusText}\n${body}`);
   }
   return res.json();
+}
+
+async function prAlreadyExists(owner, repo, branchName, token) {
+  const prs = await githubApi(`/repos/${owner}/${repo}/pulls?state=all&head=${owner}:${branchName}`, token);
+  return prs.length > 0;
 }
 
 function slugify(title) {
@@ -178,38 +191,7 @@ Hello world from agent
 `;
 }
 
-async function main() {
-  loadDotEnv();
-  const { issueRef, base: baseOverride, repo: repoArg } = parseArgs(process.argv);
-
-  const linearApiKey = process.env.LINEAR_API_KEY;
-  const githubToken = process.env.GITHUB_TOKEN;
-  const repoPath = repoArg || process.env.REPO_PATH;
-  if (!linearApiKey) fail("LINEAR_API_KEY environment variable is not set");
-  if (!githubToken) fail("GITHUB_TOKEN environment variable is not set");
-  if (!repoPath) fail("target repo path not set; pass --repo <path> or set REPO_PATH");
-
-  const issue = issueRef
-    ? await (async () => {
-        const identifier = extractIdentifier(issueRef);
-        console.log(`Fetching Linear issue ${identifier}...`);
-        return fetchLinearIssue(identifier, linearApiKey);
-      })()
-    : await (async () => {
-        console.log("No issue ref given -- fetching the most recently created Linear issue...");
-        return fetchLatestLinearIssue(linearApiKey);
-      })();
-  console.log(`Using issue ${issue.identifier}: ${issue.title}`);
-
-  const remoteUrl = run("git", ["remote", "get-url", "origin"], repoPath);
-  const { owner, repo } = parseOwnerRepo(remoteUrl);
-
-  const repoInfo = await githubApi(`/repos/${owner}/${repo}`, githubToken);
-  const base = baseOverride || repoInfo.default_branch;
-
-  const status = run("git", ["status", "--porcelain"], repoPath);
-  if (status) fail(`working tree at ${repoPath} has uncommitted changes; commit or stash them before running the agent`);
-
+function ensureBaseBranch(repoPath, base) {
   const remoteHeads = run("git", ["ls-remote", "--heads", "origin", base], repoPath);
   if (!remoteHeads) {
     console.log(`Base branch "${base}" doesn't exist on origin yet -- bootstrapping it with an empty initial commit...`);
@@ -217,11 +199,18 @@ async function main() {
     run("git", ["commit", "--allow-empty", "-m", "Initial commit"], repoPath);
     run("git", ["push", "origin", base], repoPath);
   }
-
   run("git", ["fetch", "origin", base], repoPath);
-  run("git", ["checkout", "-B", base, `origin/${base}`], repoPath);
+}
 
+async function processIssue(issue, { repoPath, owner, repo, base, githubToken }) {
   const branchName = `hello-agent/${issue.identifier.toLowerCase()}`;
+
+  if (await prAlreadyExists(owner, repo, branchName, githubToken)) {
+    console.log(`Skipping ${issue.identifier}: a PR already exists for branch ${branchName}`);
+    return null;
+  }
+
+  run("git", ["checkout", "-B", base, `origin/${base}`], repoPath);
   run("git", ["checkout", "-B", branchName], repoPath);
 
   const slug = slugify(issue.title);
@@ -235,7 +224,7 @@ async function main() {
   run("git", ["commit", "-m", `Add ${issue.identifier}: ${issue.title}`], repoPath);
   run("git", ["push", "-u", "origin", branchName, "--force-with-lease"], repoPath);
 
-  console.log("Opening pull request...");
+  console.log(`Opening pull request for ${issue.identifier}...`);
   const pr = await githubApi(`/repos/${owner}/${repo}/pulls`, githubToken, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -248,6 +237,64 @@ async function main() {
   });
 
   console.log(`PR opened: ${pr.html_url}`);
+  return pr;
+}
+
+async function main() {
+  loadDotEnv();
+  const { issueRef, base: baseOverride, repo: repoArg, team: teamArg, limit, poll } = parseArgs(process.argv);
+
+  const linearApiKey = process.env.LINEAR_API_KEY;
+  const githubToken = process.env.GITHUB_TOKEN;
+  const repoPath = repoArg || process.env.REPO_PATH;
+  const teamKey = teamArg || process.env.LINEAR_TEAM_KEY || null;
+  if (!linearApiKey) fail("LINEAR_API_KEY environment variable is not set");
+  if (!githubToken) fail("GITHUB_TOKEN environment variable is not set");
+  if (!repoPath) fail("target repo path not set; pass --repo <path> or set REPO_PATH");
+
+  const remoteUrl = run("git", ["remote", "get-url", "origin"], repoPath);
+  const { owner, repo } = parseOwnerRepo(remoteUrl);
+
+  const repoInfo = await githubApi(`/repos/${owner}/${repo}`, githubToken);
+  const base = baseOverride || repoInfo.default_branch;
+
+  const status = run("git", ["status", "--porcelain"], repoPath);
+  if (status) fail(`working tree at ${repoPath} has uncommitted changes; commit or stash them before running the agent`);
+
+  ensureBaseBranch(repoPath, base);
+  const ctx = { repoPath, owner, repo, base, githubToken };
+
+  if (poll) {
+    console.log(`Polling Linear for recent issues${teamKey ? ` (team ${teamKey})` : ""}...`);
+    const issues = await fetchRecentLinearIssues(linearApiKey, { teamKey, limit });
+    // Oldest first, so PRs land in the order the issues were created.
+    issues.reverse();
+    let processed = 0;
+    for (const issue of issues) {
+      try {
+        const pr = await processIssue(issue, ctx);
+        if (pr) processed++;
+      } catch (err) {
+        console.error(`hello-agent: failed to process ${issue.identifier}: ${err.stack ?? err}`);
+      }
+    }
+    console.log(`Poll complete: ${processed} new PR(s) opened out of ${issues.length} issue(s) checked.`);
+    return;
+  }
+
+  const issue = issueRef
+    ? await (async () => {
+        const identifier = extractIdentifier(issueRef);
+        console.log(`Fetching Linear issue ${identifier}...`);
+        return fetchLinearIssue(identifier, linearApiKey);
+      })()
+    : await (async () => {
+        console.log(`No issue ref given -- fetching the most recently created Linear issue${teamKey ? ` (team ${teamKey})` : ""}...`);
+        return fetchLatestLinearIssue(linearApiKey, { teamKey });
+      })();
+  console.log(`Using issue ${issue.identifier}: ${issue.title}`);
+
+  await processIssue(issue, ctx);
 }
 
 main().catch((err) => fail(err.stack ?? String(err)));
