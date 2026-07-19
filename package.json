@@ -1,14 +1,16 @@
 {
   "name": "hello-agent",
-  "version": "1.0.0",
-  "description": "Fetches a Linear issue, writes its details to a markdown file, and opens a GitHub PR.",
+  "version": "2.0.0",
+  "description": "AI-powered agent that reads Linear issues and creates GitHub PRs using natural language.",
   "type": "module",
-  "main": "hello-agent.js",
+  "main": "agent.js",
   "bin": {
-    "hello-agent": "./hello-agent.js"
+    "hello-agent": "./hello-agent.js",
+    "agent": "./agent.js"
   },
   "scripts": {
-    "start": "node hello-agent.js"
+    "start": "node hello-agent.js",
+    "agent": "node agent.js"
   },
   "engines": {
     "node": ">=18"
