@@ -84,7 +84,7 @@ async function main() {
     process.exit(1);
   }
 
-  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
   console.log(`\nUsing model: ${model}`);
 
   const llm = new GeminiLLM(apiKey);
