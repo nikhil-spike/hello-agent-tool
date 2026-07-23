@@ -1,16 +1,15 @@
 {
   "name": "hello-agent",
   "version": "2.0.0",
-  "description": "AI-powered agent that reads Linear issues and creates GitHub PRs using natural language.",
+  "description": "Event-driven agent that listens for Linear webhooks and opens GitHub PRs.",
   "type": "module",
-  "main": "agent.js",
+  "main": "webhook-server.js",
   "bin": {
-    "hello-agent": "./hello-agent.js",
-    "agent": "./agent.js"
+    "webhook-server": "./webhook-server.js"
   },
   "scripts": {
-    "start": "node hello-agent.js",
-    "agent": "node agent.js"
+    "start": "node webhook-server.js",
+    "webhook": "node webhook-server.js"
   },
   "engines": {
     "node": ">=18"

@@ -1,18 +1,11 @@
 # hello-agent
 
-Two ways to turn a Linear issue into a GitHub pull request:
+An event-driven agent that turns a Linear issue into a GitHub pull request. Linear calls
+`webhook-server.js` the instant a new issue is created (or an existing one is updated); it opens
+(or updates) the PR within seconds, no polling delay.
 
-1. **`hello-agent.js`** — a deterministic CLI script. Point it at an issue (or let it grab the
-   latest one), and it writes a ticket file, commits, pushes a branch, and opens a PR. No LLM
-   involved. This is also what runs on a schedule via GitHub Actions.
-2. **`agent.js`** — a conversational agent. You chat with it in plain English ("what's the
-   latest issue?", "open a PR for LIN-42"); it uses **Gemini** (function calling) to decide
-   which tool to call, asks you for confirmation according to your chosen autonomy level, and
-   reports back.
-
-Both paths write to and open PRs against a single hardcoded target repo:
-**`nikhil-spike/spike-agent`**. This tool's own code is never committed there — only the
-generated `tickets/*.md` files are.
+Writes to and opens PRs against a single hardcoded target repo: **`nikhil-spike/spike-agent`**.
+This tool's own code is never committed there — only the generated `tickets/*.md` files are.
 
 ## Requirements
 
@@ -22,7 +15,8 @@ generated `tickets/*.md` files are.
 - A Linear API key with read access to the relevant team(s)
 - A GitHub token (PAT or similar) with `repo` scope on the target repo, scoped to
   `nikhil-spike/spike-agent`
-- A free Gemini API key (only needed for `agent.js`) — get one at
+- A free Gemini API key (optional — used for an AI-generated implementation sketch on each PR;
+  without it, PRs are still opened, just without the sketch) — get one at
   [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
 
 ## Setup
@@ -35,263 +29,88 @@ GITHUB_TOKEN=ghp_...
 GEMINI_API_KEY=your_gemini_api_key_here
 REPO_PATH=/path/to/local/clone/of/spike-agent
 # GEMINI_MODEL=gemini-2.5-flash-lite   # optional override; this is already the default
+LINEAR_WEBHOOK_SECRET=lin_wh_...
+# PORT=3000
 ```
-
-Both entry points auto-load `.env` from the project root (no `dotenv` dependency needed) and
-also accept the same values as real environment variables / `--repo` flags.
 
 ## Usage
 
-### Scripted mode — `hello-agent.js`
-
 ```
-# Auto-fetch the most recently created Linear issue
-node hello-agent.js --repo /path/to/spike-agent
-
-# Use a specific issue, by identifier or Linear URL
-node hello-agent.js --repo /path/to/spike-agent LIN-123
-node hello-agent.js --repo /path/to/spike-agent https://linear.app/yourteam/issue/LIN-123/some-slug
-
-# Override the PR base branch (defaults to the repo's default branch)
-node hello-agent.js --repo /path/to/spike-agent LIN-123 --base develop
-
-# Poll mode: process every recent issue that doesn't have a PR yet
-node hello-agent.js --poll --repo /path/to/spike-agent --limit 20 --team ENG
+node webhook-server.js --repo /path/to/spike-agent
+# or: npm run webhook
 ```
 
-Runs the same way via `npm start`, or as the `hello-agent` bin if installed globally/linked.
+It needs `LINEAR_API_KEY`/`GITHUB_TOKEN`/`REPO_PATH` (env var or `--repo` flag), plus
+`LINEAR_WEBHOOK_SECRET` (Linear gives you this when you create the webhook — see step 2 below).
+`GEMINI_API_KEY` is optional; without it, PRs open without an AI-generated implementation sketch.
 
-### Conversational mode — `agent.js`
+**To test it end-to-end:**
 
-```
-npm run agent
-# or: node agent.js
-```
+1. Start the server: `node webhook-server.js --repo /path/to/spike-agent`. It listens on
+   `http://localhost:3000` by default (`--port` or `PORT` to change it).
+2. Expose it publicly with a tunnel, e.g. `ngrok http 3000`. Copy the `https://...ngrok...`
+   URL it gives you.
+3. In Linear: **Settings → API → Webhooks → New webhook**. Set the URL to
+   `<ngrok-url>/webhooks/linear`, enable the **Issues** resource, and copy the signing secret
+   Linear generates into `LINEAR_WEBHOOK_SECRET` in your `.env` (restart the server after
+   adding it).
+4. Create a new issue in Linear (any team the API key can read). Within a couple seconds you
+   should see `[webhook] New issue LIN-xx: "..." -- opening PR...` in the server's terminal,
+   followed by a link to the opened PR.
+5. Check the PR itself on GitHub, and check the ngrok inspector (`http://127.0.0.1:4040`) or
+   Linear's webhook delivery log (same settings page) if a delivery doesn't show up.
 
-On startup it asks how autonomous it should be for this run:
+`Issue` `create` events open a new PR; `update` events on an issue that already has an open PR
+regenerate the ticket file and push it to the existing branch. The server rejects any request
+whose `Linear-Signature` header doesn't match an HMAC-SHA256 of the raw body computed with your
+webhook secret, and serializes deliveries so concurrent webhooks can't race on the same git
+working tree.
 
-| Choice | Behavior |
-|---|---|
-| `1` — confirm always | Asks before every single tool call |
-| `2` — confirm once | Asks the first time it sees a given tool+args combo, remembers it for the rest of the run |
-| `3` — auto-execute | Runs tools immediately, no prompts |
-
-Your choice (and any per-action confirmations under mode 2) is persisted to
-`.agent-config.json` and offered back as the default next time you run it.
-
-Then just type requests in plain English, e.g.:
-
-```
-You: what's the latest issue in Linear?
-You: open a PR for LIN-42
-You: list the last 5 issues for the ENG team
-exit
-```
-
-### Scheduled automation — GitHub Actions
-
-`.github/workflows/poll.yml` runs `hello-agent.js --poll` every 5 minutes (and on manual
-dispatch). It checks out this repo, clones the target repo using a PAT stored in
-`secrets.TARGET_REPO_PAT`, and opens PRs for any Linear issues that don't have one yet.
+This is local/dev-only for now — nothing here is deployed anywhere. Once you're happy with the
+behavior, hosting it somewhere with a stable public URL (so you don't need ngrok, and Linear
+delivers straight to it) is a separate follow-up.
 
 ## Repository structure
 
 ```
 hello-agent-tool/
-├── agent.js                    Conversational entry point (chat + Gemini tool-calling loop)
-├── hello-agent.js               Scripted entry point (single-issue / --poll, no LLM)
+├── webhook-server.js   Event-driven entry point: Linear webhook -> PR
 ├── lib/
-│   ├── llm.js                   Thin wrapper around the Gemini generateContent REST API
-│   ├── tools.js                 Tool schemas + executor exposed to the LLM; enforces the
-│   │                             hardcoded target repo (nikhil-spike/spike-agent)
-│   ├── original.js              Shared Linear/GitHub/git logic (fetch issue, build markdown,
-│   │                             commit+push+open PR) — imported by tools.js
-│   └── config.js                Autonomy-level prompts + .agent-config.json persistence
-├── .github/workflows/poll.yml   Scheduled CI job: runs hello-agent.js --poll every 5 min
-├── .agent-config.json           Persisted autonomy choice + confirmed actions (agent.js only)
-├── .env.example                 Template for required environment variables
-├── package.json                 Two bins: `hello-agent` → hello-agent.js, `agent` → agent.js
+│   ├── llm.js          Thin wrapper around the Gemini generateContent REST API,
+│   │                    used for the issue-triage tool call (implementation sketch)
+│   └── original.js     Linear/GitHub/git logic used by webhook-server.js
+├── .env.example         Template for required environment variables
+├── package.json
 └── README.md
 ```
 
-### What each file does, and how they relate
+### What each file does
 
-- **`agent.js`** — REPL loop. Loads `.env`, reads `GEMINI_API_KEY`/`GEMINI_MODEL`, asks
-  `lib/config.js` for the autonomy level, then for each user message calls
-  `GeminiLLM.chat()` (from `lib/llm.js`) with the tool schemas from `lib/tools.js`. If Gemini
-  responds with a function call, it checks `shouldExecute()` (autonomy gate), runs
-  `executeTool()`, formats the result for display, and feeds the result back to Gemini for a
-  natural-language follow-up.
+- **`webhook-server.js`** — Plain `node:http` server, no framework. Verifies each request's
+  `Linear-Signature` against `LINEAR_WEBHOOK_SECRET` (HMAC-SHA256 of the raw body), acks
+  immediately, then — for `Issue` `create`/`update` events — re-fetches the issue via
+  `fetchLinearIssue()` and calls `processIssue()`/`updateIssuePR()`, both from `lib/original.js`.
+  Deliveries are serialized through an in-process queue since git operations can't run
+  concurrently against a single working tree.
 
-- **`hello-agent.js`** — Self-contained CLI script. Duplicates the same
-  Linear-fetch/git/GitHub-PR logic found in `lib/original.js` (kept inline here so this file
-  has zero dependency on `lib/`, matching its header comment that "this tool's own code is
-  never committed to the target repo"). Parses `--repo`/`--base`/`--team`/`--limit`/`--poll`
-  flags, resolves the issue(s), and calls `processIssue()` to do the git/GitHub work.
+- **`lib/original.js`** — Linear GraphQL calls (`fetchLinearIssue`, `fetchRecentLinearIssues`,
+  `fetchLatestLinearIssue`), GitHub REST calls (`githubApi`, `prAlreadyExists`), git plumbing
+  (`ensureBaseBranch`, `processIssue`, `updateIssuePR`), and markdown generation
+  (`buildMarkdown`). Also runs the Gemini triage step (`runTriageAgent`) before writing each
+  ticket file, folding an AI-generated implementation sketch into the PR when a `GEMINI_API_KEY`
+  is configured.
 
-- **`lib/original.js`** — The reusable core: Linear GraphQL calls (`fetchLinearIssue`,
-  `fetchRecentLinearIssues`, `fetchLatestLinearIssue`), GitHub REST calls (`githubApi`,
-  `prAlreadyExists`), git plumbing (`ensureBaseBranch`, `processIssue`), and markdown
-  generation (`buildMarkdown`). This is effectively the same logic as `hello-agent.js`'s
-  inline functions, factored out so `lib/tools.js` (and therefore `agent.js`) can reuse it
-  without re-implementing it.
-
-- **`lib/tools.js`** — Declares the 5 function-calling schemas Gemini is told about
-  (`fetch_linear_issue`, `fetch_latest_issue`, `list_recent_issues`, `create_pull_request`,
-  `get_repository_info`), and `executeTool()`, which dispatches a named call to the
-  corresponding `lib/original.js` function. Hardcodes `ALLOWED_OWNER`/`ALLOWED_REPO` as a
-  safety check — even if Gemini or `REPO_PATH` point somewhere else, PR creation refuses to
-  target any repo other than `nikhil-spike/spike-agent`, since the GitHub PAT is scoped to it.
-
-- **`lib/llm.js`** — `GeminiLLM` class. Wraps `POST
-  .../v1beta/models/{model}:generateContent`, keeps conversation history, injects the system
-  prompt (defines the agent's persona and refusal behavior for out-of-scope requests), and
-  parses back `{ text, functionCalls }`. Default model: `gemini-2.5-flash-lite` (highest
-  free-tier quota — 15 requests/min, 1,000 requests/day), overridable via `GEMINI_MODEL`.
-
-- **`lib/config.js`** — Everything about autonomy: prompts the user for a level at startup
-  (`promptForAutonomyLevel`), persists it plus any per-action confirmations to
-  `.agent-config.json` (`loadConfig`/`saveConfig`), and gates each tool call
-  (`shouldExecute`) based on the chosen level.
-
-- **`.github/workflows/poll.yml`** — Cron-triggered (`*/5 * * * *`) CI job. Clones the
-  target repo fresh each run using `secrets.TARGET_REPO_PAT`, then runs
-  `node hello-agent.js --poll` against that clone — the same code path as running it
-  locally, just unattended.
-
-- **`.agent-config.json`** — Runtime state for `agent.js` only; not read by
-  `hello-agent.js`. Reset (`confirmedActions` cleared) at the start of every `agent.js` run.
-
-## Architecture / dependency tree
-
-```
-                          ┌───────────────────┐
-                          │    package.json    │
-                          │  bins: hello-agent, │
-                          │        agent        │
-                          └─────────┬─────────┘
-                    ┌───────────────┴───────────────┐
-                    │                                 │
-                    ▼                                 ▼
-        ┌──────────────────────┐          ┌──────────────────────┐
-        │    hello-agent.js     │          │       agent.js        │
-        │  (scripted, no LLM)   │          │  (chat + Gemini LLM)  │
-        │  inline Linear/Git/   │          │                        │
-        │  GitHub logic         │          └──────────┬─────────────┘
-        └──────────┬────────────┘                     │
-                    │                    ┌─────────────┼─────────────────┐
-                    │                    ▼             ▼                 ▼
-                    │            lib/llm.js     lib/tools.js      lib/config.js
-                    │           (Gemini REST)   (tool schemas +   (autonomy prompts,
-                    │                             executeTool)     .agent-config.json)
-                    │                                  │
-                    │                                  ▼
-                    │                          lib/original.js
-                    │                     (Linear GraphQL, GitHub REST,
-                    │                      git plumbing, markdown build)
-                    │                                  │
-                    └──────────────┬───────────────────┘
-                                   ▼
-                  ┌──────────────────────────────────┐
-                  │  External services touched by      │
-                  │  both entry points:                 │
-                  │   • Linear GraphQL API              │
-                  │   • GitHub REST API                 │
-                  │   • local `git` (via child_process) │
-                  │   • target repo: nikhil-spike/       │
-                  │     spike-agent (hardcoded)          │
-                  └──────────────────────────────────┘
-
-.github/workflows/poll.yml ──cron──▶ node hello-agent.js --poll ──▶ (same path as above)
-```
-
-## Example interaction — conversational mode
-
-This is what happens end-to-end when you run `node agent.js` and ask it to open a PR for a
-specific issue:
-
-```
-┌──────┐        ┌──────────┐        ┌───────────┐        ┌────────────┐        ┌────────┐        ┌────────┐
-│ User │        │ agent.js │        │ lib/llm.js │        │ lib/tools.js│       │lib/orig│        │ Linear/│
-│      │        │ (REPL)   │        │ (Gemini)   │        │ + executeTool│      │inal.js │        │ GitHub │
-└──┬───┘        └────┬─────┘        └─────┬─────┘        └──────┬──────┘       └───┬────┘        └───┬────┘
-   │  "open a PR       │                    │                     │                  │                 │
-   │  for LIN-42"       │                    │                     │                  │                 │
-   │──────────────────▶│                    │                     │                  │                 │
-   │                   │  chat(msg, tools)   │                     │                  │                 │
-   │                   │───────────────────▶│                     │                  │                 │
-   │                   │                    │ POST generateContent │                  │                 │
-   │                   │                    │ (Gemini decides:     │                  │                 │
-   │                   │                    │  call create_pull_    │                  │                 │
-   │                   │                    │  request, args:       │                  │                 │
-   │                   │                    │  {issueIdentifier:    │                  │                 │
-   │                   │                    │   "LIN-42"})          │                  │                 │
-   │                   │◀───────────────────│                     │                  │                 │
-   │                   │  functionCalls: [create_pull_request]     │                  │                 │
-   │                   │                    │                     │                  │                 │
-   │                   │  shouldExecute()   │                     │                  │                 │
-   │                   │  (autonomy gate —  │                     │                  │                 │
-   │                   │   may prompt user) │                     │                  │                 │
-   │  "Execute...? y/n"│                    │                     │                  │                 │
-   │◀──────────────────│                    │                     │                  │                 │
-   │  "y"              │                    │                     │                  │                 │
-   │──────────────────▶│                    │                     │                  │                 │
-   │                   │  executeTool("create_pull_request", args) │                  │                 │
-   │                   │────────────────────┼────────────────────▶│                  │                 │
-   │                   │                    │                     │ check ALLOWED_   │                 │
-   │                   │                    │                     │ OWNER/REPO       │                 │
-   │                   │                    │                     │ fetchLinearIssue()│                 │
-   │                   │                    │                     │─────────────────▶│  GraphQL query   │
-   │                   │                    │                     │                  │────────────────▶│
-   │                   │                    │                     │                  │◀────────────────│
-   │                   │                    │                     │◀─────────────────│  issue details   │
-   │                   │                    │                     │ processIssue():  │                 │
-   │                   │                    │                     │  git checkout -B │                 │
-   │                   │                    │                     │  branch          │                 │
-   │                   │                    │                     │  write tickets/  │                 │
-   │                   │                    │                     │  LIN-42-*.md     │                 │
-   │                   │                    │                     │  git commit+push │                 │
-   │                   │                    │                     │─────────────────▶│  POST /pulls     │
-   │                   │                    │                     │                  │────────────────▶│
-   │                   │                    │                     │                  │◀────────────────│
-   │                   │                    │                     │◀─────────────────│  PR created      │
-   │                   │◀───────────────────┼─────────────────────│ {success, prUrl, │                 │
-   │                   │  result: {prUrl,…} │                     │  prNumber}       │                 │
-   │                   │  formatToolResult()│                     │                  │                 │
-   │  "PR #7 created!   │                    │                     │                  │                 │
-   │   View it here:…"  │                    │                     │                  │                 │
-   │◀──────────────────│                    │                     │                  │                 │
-   │                   │  chat("Tool …      │                     │                  │                 │
-   │                   │   returned: …")     │                     │                  │                 │
-   │                   │───────────────────▶│ (follow-up summary) │                  │                 │
-   │                   │◀───────────────────│                     │                  │                 │
-   │  natural-language  │                    │                     │                  │                 │
-   │  summary from Gemini│                   │                     │                  │                 │
-   │◀──────────────────│                    │                     │                  │                 │
-```
-
-## Example interaction — scripted mode
-
-```
-$ node hello-agent.js --repo ~/code/spike-agent LIN-42
-
-Fetching Linear issue LIN-42...
-Using issue LIN-42: Fix flaky login test
-Opening pull request for LIN-42...
-PR opened: https://github.com/nikhil-spike/spike-agent/pull/7
-```
-
-Internally: `hello-agent.js` → Linear GraphQL (`fetchLinearIssue`) → local `git checkout -B
-hello-agent/lin-42` → write `tickets/lin-42-fix-flaky-login-test.md` → `git commit` + `git push
---force-with-lease` → GitHub REST `POST /repos/nikhil-spike/spike-agent/pulls`.
+- **`lib/llm.js`** — `triageIssue()`, used by `lib/original.js` to decide whether an incoming
+  issue looks like a coding task worth an implementation sketch in the PR. Default model:
+  `gemini-2.5-flash-lite` (highest free-tier quota — 15 requests/min, 1,000 requests/day),
+  overridable via `GEMINI_MODEL`.
 
 ## Notes / gotchas
 
-- Both entry points refuse to run if the target repo's working tree has uncommitted changes.
-- `hello-agent/<identifier>` branches are reused — if a PR already exists for that branch,
-  the run (or that issue, in `--poll` mode) is skipped rather than duplicated.
-- `lib/tools.js` hardcodes the allowed target repo (`nikhil-spike/spike-agent`) independently
-  of `REPO_PATH`, so pointing `agent.js` at a different clone will fail fast with a clear
-  error rather than silently opening a PR somewhere unexpected.
-- The Gemini free tier resets daily at midnight Pacific time and is disabled the moment
-  billing is enabled on the project — see `lib/llm.js` for the current default model.
+- The server refuses to start if the target repo's working tree has uncommitted changes.
+- `hello-agent/<identifier>` branches are reused — if a PR already exists for that branch, a new
+  `create` event for the same issue is skipped rather than duplicated.
+- A triage failure (quota hit, API hiccup) never blocks PR creation — it just falls back to a
+  plain file with no implementation sketch.
+- The Gemini free tier resets daily at midnight Pacific time and is disabled the moment billing
+  is enabled on the project.

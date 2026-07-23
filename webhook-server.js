@@ -158,6 +158,7 @@ async function main() {
   const linearApiKey = process.env.LINEAR_API_KEY;
   const githubToken = process.env.GITHUB_TOKEN;
   const webhookSecret = process.env.LINEAR_WEBHOOK_SECRET;
+  const geminiApiKey = process.env.GEMINI_API_KEY;
   const repoPath = repoArg || process.env.REPO_PATH;
   const port = portArg || Number(process.env.PORT) || 3000;
 
@@ -165,6 +166,7 @@ async function main() {
   if (!githubToken) fail("GITHUB_TOKEN environment variable is not set");
   if (!webhookSecret) fail("LINEAR_WEBHOOK_SECRET environment variable is not set (create one when adding the webhook in Linear)");
   if (!repoPath) fail("target repo path not set; pass --repo <path> or set REPO_PATH");
+  if (!geminiApiKey) console.warn("[webhook] GEMINI_API_KEY not set -- PRs will be created without an AI-generated implementation sketch");
 
   const { owner, repo } = getRepoConfig(repoPath);
   const repoInfo = await githubApi(`/repos/${owner}/${repo}`, githubToken);
@@ -174,7 +176,7 @@ async function main() {
   if (status) fail(`working tree at ${repoPath} has uncommitted changes; commit or stash them before starting the server`);
 
   ensureBaseBranch(repoPath, base);
-  const ctx = { repoPath, owner, repo, base, githubToken, linearApiKey };
+  const ctx = { repoPath, owner, repo, base, githubToken, linearApiKey, geminiApiKey };
 
   const server = createServer(async (req, res) => {
     console.log(`[webhook] ${req.method} ${req.url}`);
