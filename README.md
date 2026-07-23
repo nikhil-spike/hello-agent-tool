@@ -4,17 +4,19 @@ An event-driven agent that turns a Linear issue into a GitHub pull request. Line
 `webhook-server.js` the instant a new issue is created (or an existing one is updated); it opens
 (or updates) the PR within seconds, no polling delay.
 
-Writes to and opens PRs against a single hardcoded target repo: **`nikhil-spike/spike-agent`**.
-This tool's own code is never committed there — only the generated `tickets/*.md` files are.
+The target repo isn't hardcoded — `owner`/`repo` are parsed from the `origin` remote of whatever
+local clone `REPO_PATH` points to. Anyone can run their own instance of this server against their
+own repo just by pointing it at a different clone; nothing in the code needs to change. This
+tool's own code is never committed to the target repo — only the generated `tickets/*.md` files
+are.
 
 ## Requirements
 
 - Node.js >= 18 (uses global `fetch`)
-- A local clone of the target repo, with `origin` set up and push access already working
+- A local clone of *your* target repo, with `origin` set up and push access already working
   (i.e. `git push` succeeds from that clone without extra flags)
 - A Linear API key with read access to the relevant team(s)
-- A GitHub token (PAT or similar) with `repo` scope on the target repo, scoped to
-  `nikhil-spike/spike-agent`
+- A GitHub token (PAT or similar) with `repo` scope on your target repo
 - A free Gemini API key (optional — used for an AI-generated implementation sketch on each PR;
   without it, PRs are still opened, just without the sketch) — get one at
   [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
@@ -27,7 +29,7 @@ Copy `.env.example` to `.env` and fill in the values:
 LINEAR_API_KEY=lin_api_...
 GITHUB_TOKEN=ghp_...
 GEMINI_API_KEY=your_gemini_api_key_here
-REPO_PATH=/path/to/local/clone/of/spike-agent
+REPO_PATH=/path/to/local/clone/of/your-target-repo
 # GEMINI_MODEL=gemini-2.5-flash-lite   # optional override; this is already the default
 LINEAR_WEBHOOK_SECRET=lin_wh_...
 # PORT=3000
@@ -36,7 +38,7 @@ LINEAR_WEBHOOK_SECRET=lin_wh_...
 ## Usage
 
 ```
-node webhook-server.js --repo /path/to/spike-agent
+node webhook-server.js --repo /path/to/your-target-repo
 # or: npm run webhook
 ```
 
@@ -46,7 +48,7 @@ It needs `LINEAR_API_KEY`/`GITHUB_TOKEN`/`REPO_PATH` (env var or `--repo` flag),
 
 **To test it end-to-end:**
 
-1. Start the server: `node webhook-server.js --repo /path/to/spike-agent`. It listens on
+1. Start the server: `node webhook-server.js --repo /path/to/your-target-repo`. It listens on
    `http://localhost:3000` by default (`--port` or `PORT` to change it).
 2. Expose it publicly with a tunnel, e.g. `ngrok http 3000`. Copy the `https://...ngrok...`
    URL it gives you.
@@ -114,3 +116,6 @@ hello-agent-tool/
   plain file with no implementation sketch.
 - The Gemini free tier resets daily at midnight Pacific time and is disabled the moment billing
   is enabled on the project.
+- Multiple people/teams can each run their own instance of this server (own `.env`, own
+  `REPO_PATH`, own Linear webhook) against their own repo without touching the code — there's no
+  shared or hardcoded target repo.
